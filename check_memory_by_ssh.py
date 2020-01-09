@@ -50,35 +50,44 @@ VERSION = "0.1"
 DEFAULT_WARNING = '75%'
 DEFAULT_CRITICAL = '90%'
 
-
 def get_meminfo(client):
-    # We are looking for a line like with value's unit forced to [KB]
-    # mem: 2064856    1736636     328220          0     142880     413184
-    #      TOTAL      USED        FREE          SHARED  BUF        CACHED
-    stdin, stdout, stderr = client.exec_command('LC_ALL=C free -k')
+
+    # get raw mem info
+    stdin, stdout, stderr = client.exec_command('LC_ALL=C cat /proc/meminfo')
+
+    # init data
     total = used = free = shared = buffed = cached = 0
+
+    # first create a dict 
+    meminfo = {}
     for line in stdout:
-        line = line.strip()
-        
-        if line.startswith('Mem'):
-            tmp = line.split(':')
-            # We will have a [2064856, 1736636, 328220, 0, 142880, 413184]
-            total, used, free, shared, buffed, cached = (int(v) for v in  tmp[1].split(' ') if v)
-        
-        if line.startswith('Swap'):
-            # We will have a [4385148          0   14385148]
-            tmp = line.split(':')
-            swap_total, swap_used, swap_free = (int(v) for v in  tmp[1].split(' ') if v)
+        raw = filter(None, line.strip().split(" "))
+        if len(raw) < 3:
+            raw.append("")
+        raw[0] = raw[0].replace(":","")
 
-    # Before return, close the client
+        meminfo[raw[0]] = {
+            "value": int(raw[1]),
+            "unit": raw[2]
+        }
+
     client.close()
-            
+
+    # get and compute data
+    # According to https://access.redhat.com/solutions/406773
+    # Note: shared is still there but forced to zero for backward compatibility (no meaning)
+
+    total      = meminfo["MemTotal"]["value"]
+    free       = meminfo["MemFree"]["value"]
+    used       = total - free
+    buffed     = meminfo["Buffers"]["value"]
+    cached     = meminfo["Cached"]["value"]
+    swap_total = meminfo["SwapTotal"]["value"]
+    swap_free  = meminfo["SwapFree"]["value"]
+    swap_used  = swap_total - swap_free
+    shared     = 0
+
     return total, used, free, shared, buffed, cached, swap_total, swap_used, swap_free
-
-
-
-
-
 
 parser = optparse.OptionParser(
     "%prog [options]", version="%prog " + VERSION)
@@ -153,10 +162,14 @@ if __name__ == '__main__':
         perfdata += ' %s=%s%%;%s;%s;0%%;100%%' % (k, int(100 * float(v)/total), _warn, _crit)
 
     # Add swap if required (actually no check supported)
-    if opts.swap :
+    if opts.swap and swap_total > 0:
         d_swap = {'swap_used':swap_used, 'swap_free':swap_free}
         for (k,v) in d_swap.iteritems():
-            perfdata += ' %s=%s%%;;;0%%;100%%' % (k, int(100 * float(v)/swap_total))
+            ## manage division by zero, this is if the host doesn't have swap
+            try:
+                perfdata += ' %s=%s%%;;;0%%;100%%' % (k, int(100 * float(v)/swap_total))
+            except ZeroDivisionError:
+                print('The server either not have swap or that partition isn\'t mounted!')
     
     
     # Add measurement if required (actually no check supported) + total
@@ -164,7 +177,7 @@ if __name__ == '__main__':
         d['total']=total
         for (k,v) in d.iteritems():
             perfdata += ' %s=%sKB;;;0KB;%sKB' % (k+'_abs', v, total) 
-        if opts.swap:
+        if opts.swap and swap_total > 0:
             d_swap['swap_total']=swap_total
             for (k,v) in d_swap.iteritems():
                 perfdata += ' %s=%sKB;;;0KB;%sKB' % (k, v, swap_total) 
